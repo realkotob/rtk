@@ -580,3 +580,124 @@ expected = "PLAY [all] *********************************************************
 name = "failed task preserved"
 input = "TASK [Start service] ***\nfailed: [web01] => {\"msg\": \"Service not found\"}\nPLAY RECAP ***\nweb01 : ok=1 failed=1"
 expected = "TASK [Start service] ***\nfailed: [web01] => {\"msg\": \"Service not found\"}\nPLAY RECAP ***\nweb01 : ok=1 failed=1"
+
+# ---------------------------------------------------------------------------
+# rtk discover top unhandled — quarto render (169), pnpm build (243), trunk build (93)
+# ---------------------------------------------------------------------------
+
+[filters.quarto-render]
+description = "Compact quarto render output"
+match_command = "^quarto\\s+render"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*processing file:",
+  "^\\s*\\d+/\\d+\\s",
+  "^\\s*running",
+  "^\\s*Rendering",
+  "^pandoc ",
+  "^  Validating",
+  "^  Resolving",
+]
+match_output = [
+  { pattern = "Output created:", message = "ok (output created)" },
+]
+max_lines = 20
+
+[filters.pnpm-build]
+description = "Compact pnpm build output (conservative — strips blanks and ANSI only)"
+match_command = "^pnpm\\s+build"
+strip_ansi = true
+strip_lines_matching = ["^\\s*$"]
+max_lines = 50
+
+[filters.trunk-build]
+description = "Compact trunk build output"
+match_command = "^trunk\\s+build"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*Compiling\\s",
+  "^\\s*Downloading\\s",
+  "^\\s*Fetching\\s",
+  "^\\s*Fresh\\s",
+  "^\\s*Checking\\s",
+]
+tail_lines = 10
+max_lines = 30
+on_empty = "trunk build: ok"
+
+# ---------------------------------------------------------------------------
+# Inline tests — discover-driven filters
+# ---------------------------------------------------------------------------
+
+[[tests.quarto-render]]
+name = "success short-circuits to ok"
+input = """
+processing file: index.qmd
+  Validating schema
+  Resolving resources
+pandoc to html5
+Output created: _site/index.html
+"""
+expected = "ok (output created)"
+
+[[tests.quarto-render]]
+name = "error passes through"
+input = """
+processing file: broken.qmd
+  Validating schema
+ERROR: Render failed
+
+caused by:
+  syntax error at line 10
+"""
+expected = "ERROR: Render failed\ncaused by:\n  syntax error at line 10"
+
+[[tests.pnpm-build]]
+name = "strips blank lines, keeps build output"
+input = """
+> my-app@1.0.0 build
+> next build
+
+  ▲ Next.js 14.0.0
+
+✓ Creating an optimized production build
+✓ Compiled successfully
+✓ Collecting page data
+✓ Generating static pages (12/12)
+
+Route (app)              Size     First Load JS
+┌ ○ /                   5.2 kB         101 kB
+└ ○ /about              3.1 kB          99 kB
+"""
+expected = "> my-app@1.0.0 build\n> next build\n  ▲ Next.js 14.0.0\n✓ Creating an optimized production build\n✓ Compiled successfully\n✓ Collecting page data\n✓ Generating static pages (12/12)\nRoute (app)              Size     First Load JS\n┌ ○ /                   5.2 kB         101 kB\n└ ○ /about              3.1 kB          99 kB"
+
+[[tests.pnpm-build]]
+name = "strips blank lines only"
+input = "Building...\n\nDone in 3.2s"
+expected = "Building...\nDone in 3.2s"
+
+[[tests.trunk-build]]
+name = "strips compile noise, keeps tail summary"
+input = """
+   Compiling tokio v1.35.0
+   Compiling hyper v0.14.28
+   Compiling my-crate v0.1.0
+   Downloading serde v1.0.195
+   Fresh regex v1.10.2
+
+   Finished release [optimized] target(s) in 45.23s
+   Binary: target/release/my-crate (5.2MB)
+"""
+expected = "   Finished release [optimized] target(s) in 45.23s\n   Binary: target/release/my-crate (5.2MB)"
+
+[[tests.trunk-build]]
+name = "on_empty when all noise stripped"
+input = """
+   Compiling my-crate v0.1.0
+   Fresh serde v1.0
+   Checking tokio v1.35.0
+
+"""
+expected = "trunk build: ok"
