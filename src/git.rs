@@ -76,6 +76,9 @@ fn run_diff(
         let mut cmd = git_cmd(global_args);
         cmd.arg("diff");
         for arg in args {
+            if arg == "--no-compact" {
+                continue; // RTK flag, not a git flag
+            }
             cmd.arg(arg);
         }
 
@@ -279,6 +282,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     let mut in_hunk = false;
     let mut hunk_lines = 0;
     let max_hunk_lines = 30;
+    let mut was_truncated = false;
 
     for line in diff.lines() {
         if line.starts_with("diff --git") {
@@ -287,7 +291,7 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
                 result.push(format!("  +{} -{}", added, removed));
             }
             current_file = line.split(" b/").nth(1).unwrap_or("unknown").to_string();
-            result.push(format!("\n📄 {}", current_file));
+            result.push(format!("\n{}", current_file));
             added = 0;
             removed = 0;
             in_hunk = false;
@@ -321,17 +325,23 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
             if hunk_lines == max_hunk_lines {
                 result.push("  ... (truncated)".to_string());
                 hunk_lines += 1;
+                was_truncated = true;
             }
         }
 
         if result.len() >= max_lines {
             result.push("\n... (more changes truncated)".to_string());
+            was_truncated = true;
             break;
         }
     }
 
     if !current_file.is_empty() && (added > 0 || removed > 0) {
         result.push(format!("  +{} -{}", added, removed));
+    }
+
+    if was_truncated {
+        result.push("[full diff: rtk git diff --no-compact]".to_string());
     }
 
     result.join("\n")
