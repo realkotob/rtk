@@ -1,5 +1,21 @@
 # RTK Troubleshooting Guide
 
+## Problem: "Does RTK break Claude's prompt cache?"
+
+### Short Answer
+
+No. RTK filters command output once at execution time. The filtered result is stored in conversation history and never changes between API calls. Prompt caching works on prefix matching, and RTK does not alter the prefix.
+
+### Details
+
+RTK actually improves cache economics: smaller tool results mean cheaper cache writes (1.25x on fewer tokens) and reads (0.1x on fewer tokens).
+
+Run `rtk gain` to see your actual cache metrics — cache writes and reads are tracked alongside standard token savings.
+
+Full technical explanation: [docs/PROMPT_CACHING.md](PROMPT_CACHING.md)
+
+---
+
 ## Problem: "rtk gain" command not found
 
 ### Symptom
