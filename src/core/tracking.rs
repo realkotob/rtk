@@ -29,7 +29,7 @@
 //!
 //! See [docs/tracking.md](../docs/tracking.md) for full documentation.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -249,8 +249,21 @@ impl Tracker {
     pub fn new() -> Result<Self> {
         let db_path = get_db_path()?;
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            crate::core::utils::create_private_dir(parent)?;
         }
+
+        // Create the file ourselves so SQLite derives the -wal/-shm modes from
+        // an already-private DB instead of the umask.
+        crate::core::utils::open_private(
+            std::fs::OpenOptions::new().write(true).create(true),
+            &db_path,
+        )
+        .with_context(|| {
+            format!(
+                "Failed to pre-create private DB file: {}",
+                db_path.display()
+            )
+        })?;
 
         let conn = Connection::open(&db_path)?;
         // WAL mode + busy_timeout for concurrent access (multiple Claude Code instances).
@@ -323,7 +336,60 @@ impl Tracker {
             [],
         )?;
 
+        restrict_db_files(&db_path);
+
         Ok(Self { conn })
+    }
+
+    /// Create an isolated in-memory tracker for tests.
+    #[cfg(test)]
+    pub fn new_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory().context("Failed to open in-memory DB")?;
+        let tracker = Self { conn };
+        tracker.init_schema()?;
+        Ok(tracker)
+    }
+
+    #[cfg(test)]
+    fn init_schema(&self) -> Result<()> {
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS commands (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                original_cmd TEXT NOT NULL,
+                rtk_cmd TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                saved_tokens INTEGER NOT NULL,
+                savings_pct REAL NOT NULL,
+                exec_time_ms INTEGER DEFAULT 0,
+                project_path TEXT DEFAULT ''
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_timestamp ON commands(timestamp)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_project_path_timestamp ON commands(project_path, timestamp)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS parse_failures (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                raw_command TEXT NOT NULL,
+                error_message TEXT NOT NULL,
+                fallback_succeeded INTEGER NOT NULL DEFAULT 0
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pf_timestamp ON parse_failures(timestamp)",
+            [],
+        )?;
+        Ok(())
     }
 
     /// Record a command execution with token counts and timing.
@@ -395,6 +461,19 @@ impl Tracker {
             "DELETE FROM parse_failures WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
         )?;
+        Ok(())
+    }
+
+    /// Delete all tracked data (commands + parse_failures), resetting all stats to zero.
+    pub fn reset_all(&self) -> Result<()> {
+        self.conn
+            .execute_batch(
+                "BEGIN;
+                 DELETE FROM commands;
+                 DELETE FROM parse_failures;
+                 COMMIT;",
+            )
+            .context("Failed to reset tracking database")?;
         Ok(())
     }
 
@@ -1153,7 +1232,28 @@ fn categorize_command(rtk_cmd: &str) -> String {
     .to_string()
 }
 
-fn get_db_path() -> Result<PathBuf> {
+/// SQLite appends `-wal`/`-shm` to the whole filename, so these are siblings
+/// rather than extension swaps. Concatenate on `OsString`, not `PathBuf::push`,
+/// which would append a component and silently target `history.db/-wal`.
+fn restrict_db_files(db_path: &std::path::Path) {
+    crate::core::utils::restrict_file(db_path);
+    for sidecar in db_sidecars(db_path) {
+        crate::core::utils::restrict_file(&sidecar);
+    }
+}
+
+fn db_sidecars(db_path: &std::path::Path) -> Vec<PathBuf> {
+    ["-wal", "-shm"]
+        .iter()
+        .map(|suffix| {
+            let mut name = db_path.as_os_str().to_os_string();
+            name.push(suffix);
+            PathBuf::from(name)
+        })
+        .collect()
+}
+
+pub(crate) fn get_db_path() -> Result<PathBuf> {
     // Priority 1: Environment variable RTK_DB_PATH
     if let Ok(custom_path) = std::env::var("RTK_DB_PATH") {
         return Ok(PathBuf::from(custom_path));
@@ -1481,29 +1581,27 @@ mod tests {
     }
 
     // 7. get_db_path respects environment variable RTK_DB_PATH
+    // 8. get_db_path falls back to default when no custom config
+    // Combined into one test to avoid env var race between parallel tests
     #[test]
-    fn test_custom_db_path_env() {
+    fn test_db_path_env_and_default() {
         use std::env;
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
 
         let custom_path = env::temp_dir().join("rtk_test_custom.db");
         env::set_var("RTK_DB_PATH", &custom_path);
-
         let db_path = get_db_path().expect("Failed to get db path");
         assert_eq!(db_path, custom_path);
 
         env::remove_var("RTK_DB_PATH");
-    }
-
-    // 8. get_db_path falls back to default when no custom config
-    #[test]
-    fn test_default_db_path() {
-        use std::env;
-
-        // Ensure no env var is set
-        env::remove_var("RTK_DB_PATH");
-
         let db_path = get_db_path().expect("Failed to get db path");
-        assert!(db_path.ends_with("rtk/history.db"));
+        assert!(
+            db_path.ends_with("rtk/history.db"),
+            "expected default path ending with rtk/history.db, got: {}",
+            db_path.display()
+        );
     }
 
     // 9. project_filter_params uses GLOB pattern with * wildcard // added
@@ -1583,5 +1681,80 @@ mod tests {
         // We can't assert exact rate because other tests may have added records,
         // but we can verify recovery_rate is between 0 and 100
         assert!(summary.recovery_rate >= 0.0 && summary.recovery_rate <= 100.0);
+    }
+
+    #[test]
+    fn test_reset_all_clears_both_tables() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create in-memory tracker");
+        let pid = std::process::id();
+
+        // Insert into commands
+        tracker
+            .record(
+                "git status",
+                &format!("rtk git status reset_test_{}", pid),
+                100,
+                20,
+                50,
+            )
+            .expect("Failed to record command");
+
+        // Insert into parse_failures
+        tracker
+            .record_parse_failure(&format!("bad_cmd_reset_test_{}", pid), "parse error", false)
+            .expect("Failed to record parse failure");
+
+        // Reset everything
+        tracker.reset_all().expect("Failed to reset");
+
+        // Both tables should be empty
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        assert_eq!(
+            summary.total_commands, 0,
+            "commands table should be empty after reset"
+        );
+
+        let failures = tracker
+            .get_parse_failure_summary()
+            .expect("Failed to get failure summary");
+        assert_eq!(
+            failures.total, 0,
+            "parse_failures table should be empty after reset"
+        );
+    }
+
+    #[test]
+    fn test_db_sidecars_are_siblings_not_children() {
+        let got = db_sidecars(std::path::Path::new("/data/rtk/history.db"));
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("/data/rtk/history.db-wal"),
+                PathBuf::from("/data/rtk/history.db-shm"),
+            ],
+            "PathBuf::push would yield history.db/-wal and silently harden nothing"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_restrict_db_files_covers_wal_sidecars() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join("history.db");
+        let wal = tmp.path().join("history.db-wal");
+        let shm = tmp.path().join("history.db-shm");
+        for p in [&db, &wal, &shm] {
+            std::fs::write(p, b"x").expect("write");
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        }
+
+        restrict_db_files(&db);
+
+        for p in [&db, &wal, &shm] {
+            let mode = std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "expected 0600 on {}", p.display());
+        }
     }
 }
