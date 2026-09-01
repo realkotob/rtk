@@ -3,6 +3,8 @@ use super::report::RtkStatus;
 pub struct RtkRule {
     pub pattern: &'static str,
     pub rtk_cmd: &'static str,
+    /// Whether this command may be rewritten as the final pipeline stage.
+    pub pipeline_final_safe: bool,
     pub rewrite_prefixes: &'static [&'static str],
     pub category: &'static str,
     pub savings_pct: f64,
@@ -10,11 +12,34 @@ pub struct RtkRule {
     pub subcmd_status: &'static [(&'static str, RtkStatus)],
 }
 
+impl RtkRule {
+    // `Default::default()` isn't a const fn on stable, so `RULES` (a const array) can't call
+    // it via `..Default::default()` — hence this associated const as the const-context
+    // workaround. Once `const_trait_impl` stabilizes, drop this and derive/impl
+    // `const Default` instead, then switch call sites back to `..RtkRule::default()`.
+    pub const DEFAULT: RtkRule = RtkRule {
+        pattern: "",
+        rtk_cmd: "",
+        pipeline_final_safe: false,
+        rewrite_prefixes: &[],
+        category: "",
+        savings_pct: 60.0,
+        subcmd_savings: &[],
+        subcmd_status: &[],
+    };
+}
+
+impl Default for RtkRule {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|push|pull|branch|fetch|stash|worktree)",
+        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree)",
         rtk_cmd: "rtk git",
-        rewrite_prefixes: &["git"],
+        rewrite_prefixes: &["git", "yadm"],
         category: "Git",
         savings_pct: 70.0,
         subcmd_savings: &[
@@ -23,7 +48,7 @@ pub const RULES: &[RtkRule] = &[
             ("add", 59.0),
             ("commit", 59.0),
         ],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^gh\s+(pr|issue|run|repo|api|release)",
@@ -32,7 +57,16 @@ pub const RULES: &[RtkRule] = &[
         category: "GitHub",
         savings_pct: 82.0,
         subcmd_savings: &[("pr", 87.0), ("run", 82.0), ("issue", 80.0)],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^glab\s+(mr|issue|ci|pipeline|api|release)",
+        rtk_cmd: "rtk glab",
+        rewrite_prefixes: &["glab"],
+        category: "GitLab",
+        savings_pct: 82.0,
+        subcmd_savings: &[("mr", 87.0), ("ci", 82.0), ("issue", 80.0)],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^cargo\s+(build|test|clippy|check|fmt|install)",
@@ -42,24 +76,23 @@ pub const RULES: &[RtkRule] = &[
         savings_pct: 80.0,
         subcmd_savings: &[("test", 90.0), ("check", 80.0)],
         subcmd_status: &[("fmt", RtkStatus::Passthrough)],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^pnpm\s+(list|ls|outdated|install)",
+        pattern: r"^pnpm\s+(exec|i|install|list|ls|outdated|run|run-script)",
         rtk_cmd: "rtk pnpm",
         rewrite_prefixes: &["pnpm"],
         category: "PackageManager",
         savings_pct: 80.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^npm\s+(run|exec)",
+        pattern: r"^npm\s+(exec|run|run-script|rum|urn|x)(\s|$)",
         rtk_cmd: "rtk npm",
         rewrite_prefixes: &["npm"],
         category: "PackageManager",
         savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^npx\s+",
@@ -67,26 +100,32 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["npx"],
         category: "PackageManager",
         savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^(cat|head|tail)\s+",
         rtk_cmd: "rtk read",
         rewrite_prefixes: &["cat", "head", "tail"],
         category: "Files",
-        savings_pct: 60.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(rg|grep)\s+",
+        pattern: r"^grep\s+",
         rtk_cmd: "rtk grep",
-        rewrite_prefixes: &["rg", "grep"],
+        pipeline_final_safe: true,
+        rewrite_prefixes: &["grep"],
         category: "Files",
         savings_pct: 75.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^rg\s+",
+        rtk_cmd: "rtk rg",
+        pipeline_final_safe: true,
+        rewrite_prefixes: &["rg"],
+        category: "Files",
+        savings_pct: 75.0,
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^ls(\s|$)",
@@ -94,8 +133,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["ls"],
         category: "Files",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^find\s+",
@@ -103,78 +141,263 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["find"],
         category: "Files",
         savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(npx\s+|pnpm\s+)?tsc(\s|$)",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?tsc(\s|$)",
         rtk_cmd: "rtk tsc",
-        rewrite_prefixes: &["pnpm tsc", "npx tsc", "tsc"],
+        rewrite_prefixes: &[
+            "npm exec tsc",
+            "npm rum tsc",
+            "npm run tsc",
+            "npm run-script tsc",
+            "npm tsc",
+            "npm urn tsc",
+            "npm x tsc",
+            "npx tsc",
+            "pnpm dlx tsc",
+            "pnpm exec tsc",
+            "pnpm run tsc",
+            "pnpm run-script tsc",
+            "pnpm tsc",
+            "pnpx tsc",
+            "tsc",
+        ],
         category: "Build",
         savings_pct: 83.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(npx\s+|pnpm\s+)?(eslint|biome|lint)(\s|$)",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?(biome|eslint|lint)(\s|$)",
         rtk_cmd: "rtk lint",
         rewrite_prefixes: &[
-            "npx eslint",
-            "pnpm lint",
-            "npx biome",
-            "eslint",
             "biome",
+            "eslint",
             "lint",
+            "npm biome",
+            "npm eslint",
+            "npm exec biome",
+            "npm exec eslint",
+            "npm lint",
+            "npm rum biome",
+            "npm rum eslint",
+            "npm rum lint",
+            "npm run biome",
+            "npm run eslint",
+            "npm run lint",
+            "npm run-script biome",
+            "npm run-script eslint",
+            "npm run-script lint",
+            "npm urn biome",
+            "npm urn eslint",
+            "npm urn lint",
+            "npm x biome",
+            "npm x eslint",
+            "npx biome",
+            "npx eslint",
+            "npx lint",
+            "pnpm biome",
+            "pnpm dlx biome",
+            "pnpm dlx eslint",
+            "pnpm eslint",
+            "pnpm exec biome",
+            "pnpm exec eslint",
+            "pnpm lint",
+            "pnpm run biome",
+            "pnpm run eslint",
+            "pnpm run lint",
+            "pnpm run-script biome",
+            "pnpm run-script eslint",
+            "pnpm run-script lint",
+            "pnpx biome",
+            "pnpx eslint",
+            "pnpx lint",
         ],
         category: "Build",
         savings_pct: 84.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(npx\s+|pnpm\s+)?prettier",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?prettier",
         rtk_cmd: "rtk prettier",
-        rewrite_prefixes: &["npx prettier", "pnpm prettier", "prettier"],
+        rewrite_prefixes: &[
+            "npm exec prettier",
+            "npm prettier",
+            "npm rum prettier",
+            "npm run prettier",
+            "npm run-script prettier",
+            "npm urn prettier",
+            "npm x prettier",
+            "npx prettier",
+            "pnpm dlx prettier",
+            "pnpm exec prettier",
+            "pnpm prettier",
+            "pnpm run prettier",
+            "pnpm run-script prettier",
+            "pnpx prettier",
+            "prettier",
+        ],
         category: "Build",
         savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(npx\s+|pnpm\s+)?next\s+build",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?next\s+build",
         rtk_cmd: "rtk next",
-        rewrite_prefixes: &["npx next build", "pnpm next build", "next build"],
+        rewrite_prefixes: &[
+            "next build",
+            "npm exec next build",
+            "npm next build",
+            "npm rum next build",
+            "npm run next build",
+            "npm run-script next build",
+            "npm urn next build",
+            "npm x next build",
+            "npx next build",
+            "pnpm dlx next build",
+            "pnpm exec next build",
+            "pnpm next build",
+            "pnpm run next build",
+            "pnpm run-script next build",
+            "pnpx next build",
+        ],
         category: "Build",
         savings_pct: 87.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(pnpm\s+|npx\s+)?(vitest|jest|test)(\s|$)",
-        rtk_cmd: "rtk vitest",
-        rewrite_prefixes: &["pnpm vitest", "npx vitest", "vitest", "jest"],
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?jest(\s+run)?(\s|$)",
+        rtk_cmd: "rtk jest",
+        rewrite_prefixes: &[
+            "jest run",
+            "jest",
+            "npm exec jest run",
+            "npm exec jest",
+            "npm jest run",
+            "npm jest",
+            "npm rum jest run",
+            "npm rum jest",
+            "npm run jest run",
+            "npm run jest",
+            "npm run-script jest run",
+            "npm run-script jest",
+            "npm urn jest run",
+            "npm urn jest",
+            "npm x jest run",
+            "npm x jest",
+            "npx jest run",
+            "npx jest",
+            "pnpm dlx jest run",
+            "pnpm dlx jest",
+            "pnpm exec jest run",
+            "pnpm exec jest",
+            "pnpm jest run",
+            "pnpm jest",
+            "pnpm run jest run",
+            "pnpm run jest",
+            "pnpm run-script jest run",
+            "pnpm run-script jest",
+            "pnpx jest run",
+            "pnpx jest",
+        ],
         category: "Tests",
         savings_pct: 99.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(npx\s+|pnpm\s+)?playwright",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?vitest(\s+run)?(\s|$)",
+        rtk_cmd: "rtk vitest",
+        rewrite_prefixes: &[
+            "npm exec vitest run",
+            "npm exec vitest",
+            "npm rum vitest run",
+            "npm rum vitest",
+            "npm run vitest run",
+            "npm run vitest",
+            "npm run-script vitest run",
+            "npm run-script vitest",
+            "npm urn vitest run",
+            "npm urn vitest",
+            "npm vitest run",
+            "npm vitest",
+            "npm x vitest run",
+            "npm x vitest",
+            "npx vitest run",
+            "npx vitest",
+            "pnpm dlx vitest run",
+            "pnpm dlx vitest",
+            "pnpm exec vitest run",
+            "pnpm exec vitest",
+            "pnpm run vitest run",
+            "pnpm run vitest",
+            "pnpm run-script vitest run",
+            "pnpm run-script vitest",
+            "pnpm vitest run",
+            "pnpm vitest",
+            "pnpx vitest run",
+            "pnpx vitest",
+            "vitest run",
+            "vitest",
+        ],
+        category: "Tests",
+        savings_pct: 99.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^ctest(?:\s|$)",
+        rtk_cmd: "rtk ctest",
+        rewrite_prefixes: &["ctest"],
+        category: "Tests",
+        savings_pct: 80.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?playwright",
         rtk_cmd: "rtk playwright",
-        rewrite_prefixes: &["npx playwright", "pnpm playwright", "playwright"],
+        rewrite_prefixes: &[
+            "npm exec playwright",
+            "npm playwright",
+            "npm rum playwright",
+            "npm run playwright",
+            "npm run-script playwright",
+            "npm urn playwright",
+            "npm x playwright",
+            "npx playwright",
+            "playwright",
+            "pnpm dlx playwright",
+            "pnpm exec playwright",
+            "pnpm playwright",
+            "pnpm run playwright",
+            "pnpm run-script playwright",
+            "pnpx playwright",
+        ],
         category: "Tests",
         savings_pct: 94.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(npx\s+|pnpm\s+)?prisma",
+        pattern: r"^((p?np(m|x)|p?npm\s+(exec|run|run-script)|npm\s+(rum|urn|x)|pnpm\s+dlx)\s+)?prisma",
         rtk_cmd: "rtk prisma",
-        rewrite_prefixes: &["npx prisma", "pnpm prisma", "prisma"],
+        rewrite_prefixes: &[
+            "npm exec prisma",
+            "npm prisma",
+            "npm rum prisma",
+            "npm run prisma",
+            "npm run-script prisma",
+            "npm urn prisma",
+            "npm x prisma",
+            "npx prisma",
+            "pnpm dlx prisma",
+            "pnpm exec prisma",
+            "pnpm prisma",
+            "pnpm run prisma",
+            "pnpm run-script prisma",
+            "pnpx prisma",
+            "prisma",
+        ],
         category: "Build",
         savings_pct: 88.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^docker\s+(ps|images|logs|run|exec|build|compose\s+(ps|logs|build))",
@@ -182,8 +405,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["docker"],
         category: "Infra",
         savings_pct: 85.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^kubectl\s+(get|logs|describe|apply)",
@@ -191,8 +413,15 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["kubectl"],
         category: "Infra",
         savings_pct: 85.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^oc\s+(get|logs|describe|apply|status|adm)",
+        rtk_cmd: "rtk oc",
+        rewrite_prefixes: &["oc"],
+        category: "Infra",
+        savings_pct: 85.0,
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^tree(\s|$)",
@@ -200,17 +429,14 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["tree"],
         category: "Files",
         savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^diff\s+",
         rtk_cmd: "rtk diff",
         rewrite_prefixes: &["diff"],
         category: "Files",
-        savings_pct: 60.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^curl\s+",
@@ -218,8 +444,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["curl"],
         category: "Network",
         savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^wget\s+",
@@ -227,8 +452,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["wget"],
         category: "Network",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^(python3?\s+-m\s+)?mypy(\s|$)",
@@ -236,8 +460,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["python3 -m mypy", "python -m mypy", "mypy"],
         category: "Build",
         savings_pct: 80.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^ruff\s+(check|format)",
@@ -246,25 +469,32 @@ pub const RULES: &[RtkRule] = &[
         category: "Python",
         savings_pct: 80.0,
         subcmd_savings: &[("check", 80.0), ("format", 75.0)],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(python\s+-m\s+)?pytest(\s|$)",
+        pattern: r"^(python[0-9.]*\s+-m\s+)?pytest(\s|$)",
         rtk_cmd: "rtk pytest",
-        rewrite_prefixes: &["python -m pytest", "pytest"],
+        rewrite_prefixes: &["python3 -m pytest", "python -m pytest", "pytest"],
         category: "Python",
         savings_pct: 90.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^(pip3?|uv\s+pip)\s+(list|outdated|install)",
+        pattern: r"^(pip3?|uv\s+pip)\s+(list|outdated|install|show)",
         rtk_cmd: "rtk pip",
         rewrite_prefixes: &["pip3", "pip", "uv pip"],
         category: "Python",
         savings_pct: 75.0,
         subcmd_savings: &[("list", 75.0), ("outdated", 80.0)],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^uv\s+run(?:\s|$)",
+        rtk_cmd: "rtk uv",
+        rewrite_prefixes: &["uv"],
+        category: "Python",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^go\s+(test|build|vet)",
@@ -273,16 +503,25 @@ pub const RULES: &[RtkRule] = &[
         category: "Go",
         savings_pct: 85.0,
         subcmd_savings: &[("test", 90.0), ("build", 80.0), ("vet", 75.0)],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^golangci-lint(\s|$)",
-        rtk_cmd: "rtk golangci-lint",
-        rewrite_prefixes: &["golangci-lint", "golangci"],
+        pattern: r"^(?:golangci-lint|golangci)\s+(run)(?:\s|$)",
+        rtk_cmd: "rtk golangci-lint run",
+        rewrite_prefixes: &["golangci-lint run", "golangci run"],
         category: "Go",
         savings_pct: 85.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
+    },
+    // Scala/SBT
+    RtkRule {
+        pattern: r#"^sbt\s+["']?(testOnly|testQuick|test|compile|run|clean|assembly|package)(?:[\s"']|$)"#,
+        rtk_cmd: "rtk sbt",
+        rewrite_prefixes: &["sbt"],
+        category: "Build",
+        savings_pct: 80.0,
+        subcmd_savings: &[("test", 90.0), ("testOnly", 90.0), ("compile", 75.0)],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^bundle\s+(install|update)\b",
@@ -290,8 +529,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["bundle"],
         category: "Ruby",
         savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^(?:bundle\s+exec\s+)?(?:bin/)?(?:rake|rails)\s+test",
@@ -306,7 +544,7 @@ pub const RULES: &[RtkRule] = &[
         category: "Ruby",
         savings_pct: 85.0,
         subcmd_savings: &[("test", 90.0)],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^(?:bundle\s+exec\s+)?rspec(?:\s|$)",
@@ -314,8 +552,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["bundle exec rspec", "bin/rspec", "rspec"],
         category: "Tests",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^(?:bundle\s+exec\s+)?rubocop(?:\s|$)",
@@ -323,8 +560,84 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["bundle exec rubocop", "rubocop"],
         category: "Build",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
+    },
+    // PHP tooling
+    RtkRule {
+        pattern: r"^php\s+artisan(?:\s|$)",
+        rtk_cmd: "rtk php",
+        rewrite_prefixes: &["php"],
+        category: "Build",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^php\s+-l(?:\s|$)",
+        rtk_cmd: "rtk php",
+        rewrite_prefixes: &["php"],
+        category: "Build",
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^php\s+run-tests\.php(?:\s|$)",
+        rtk_cmd: "rtk phpt",
+        rewrite_prefixes: &["php run-tests.php"],
+        category: "Tests",
+        savings_pct: 99.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(?:php\s+)?(?:\./)?(?:(?:vendor/)?bin/)?phpunit(?:\s|$)",
+        rtk_cmd: "rtk phpunit",
+        // rewrite_segment_inner normalizes the php wrapper, `./`, vendor/bin and
+        // composer bin-dir before matching, so only the residual forms remain:
+        // a plain `bin/` (not a Composer dir, so it survives normalization) and
+        // the bare tool name.
+        rewrite_prefixes: &["bin/phpunit", "phpunit"],
+        category: "Tests",
+        savings_pct: 75.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(?:php\s+)?(?:\./)?(?:(?:vendor/)?bin/)?phpstan\s+analy[sz]e\b",
+        rtk_cmd: "rtk phpstan",
+        rewrite_prefixes: &["bin/phpstan", "phpstan"],
+        category: "Build",
+        savings_pct: 65.0,
+        subcmd_savings: &[("analyse", 65.0), ("analyze", 65.0)],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(?:\./)?(?:vendor/bin/)?pest(?:\s|$)",
+        rtk_cmd: "rtk pest",
+        rewrite_prefixes: &["pest"],
+        category: "Tests",
+        savings_pct: 80.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(?:\./)?(?:vendor/bin/)?paratest(?:\s|$)",
+        rtk_cmd: "rtk paratest",
+        rewrite_prefixes: &["paratest"],
+        category: "Tests",
+        savings_pct: 80.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(?:\./)?(?:vendor/bin/)?ecs(?:\s|$)",
+        rtk_cmd: "rtk ecs",
+        rewrite_prefixes: &["ecs"],
+        category: "Build",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(?:\./)?(?:vendor/bin/)?pint(?:\s|$)",
+        rtk_cmd: "rtk pint",
+        rewrite_prefixes: &["pint"],
+        category: "Build",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^aws\s+",
@@ -348,7 +661,7 @@ pub const RULES: &[RtkRule] = &[
             ("sqs", 78.0),
             ("secretsmanager", 75.0),
         ],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^psql(\s|$)",
@@ -356,8 +669,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["psql"],
         category: "Infra",
         savings_pct: 75.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^ansible-playbook\b",
@@ -365,8 +677,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["ansible-playbook"],
         category: "Infra",
         savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^brew\s+(install|upgrade)\b",
@@ -374,8 +685,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["brew"],
         category: "PackageManager",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^composer\s+(install|update|require)\b",
@@ -383,17 +693,14 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["composer"],
         category: "PackageManager",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^df(\s|$)",
         rtk_cmd: "rtk df",
         rewrite_prefixes: &["df"],
         category: "System",
-        savings_pct: 60.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^dotnet\s+build\b",
@@ -401,26 +708,21 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["dotnet"],
         category: "Build",
         savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^du\b",
         rtk_cmd: "rtk du",
         rewrite_prefixes: &["du"],
         category: "System",
-        savings_pct: 60.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^fail2ban-client\b",
         rtk_cmd: "rtk fail2ban-client",
         rewrite_prefixes: &["fail2ban-client"],
         category: "Infra",
-        savings_pct: 60.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^gcloud\b",
@@ -428,8 +730,16 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["gcloud"],
         category: "Infra",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^(?:\./gradlew|gradlew\.bat|gradlew|gradle)(?:\s+(test|build|clean|assemble\w*|install\w*|check|lint\w*|dependencies))?(\s|$)",
+        rtk_cmd: "rtk gradlew",
+        rewrite_prefixes: &["./gradlew", "gradlew.bat", "gradlew", "gradle"],
+        category: "Build",
+        savings_pct: 75.0,
+        subcmd_savings: &[("test", 90.0), ("build", 80.0), ("check", 80.0)],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^hadolint\b",
@@ -437,8 +747,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["hadolint"],
         category: "Build",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^helm\b",
@@ -446,17 +755,14 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["helm"],
         category: "Infra",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^iptables\b",
         rtk_cmd: "rtk iptables",
         rewrite_prefixes: &["iptables"],
         category: "Infra",
-        savings_pct: 60.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^make\b",
@@ -464,8 +770,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["make"],
         category: "Build",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^markdownlint\b",
@@ -473,8 +778,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["markdownlint"],
         category: "Build",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^mix\s+(compile|format)(\s|$)",
@@ -482,26 +786,37 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["mix"],
         category: "Build",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
-        pattern: r"^mvn\s+(compile|package|clean|install)\b",
+        pattern: r"^(?:\./mvnw|mvnw\.cmd|mvnw|mvn)\b(?:\s+\S+)*?\s+(compile|test|integration-test|package|install|verify|deploy)\b",
         rtk_cmd: "rtk mvn",
-        rewrite_prefixes: &["mvn"],
+        rewrite_prefixes: &["./mvnw", "mvnw.cmd", "mvnw", "mvn"],
         category: "Build",
-        savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        savings_pct: 82.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        // `mvnd` is a separate binary, not a `mvn` wrapper — it must keep its
+        // own rtk_cmd so the daemon is what actually runs. mvnd ships
+        // `mvnd.cmd` on Windows; listed explicitly (longer prefix first) on
+        // both the pattern and rewrite_prefixes, mirroring the mvn rule's
+        // `mvnw.cmd` handling — `^mvnd\b` alone matches the `.` boundary in
+        // `mvnd.cmd` but can't then reach `\s+(compile|...)`, so it silently
+        // fails to classify the command at all.
+        pattern: r"^(?:mvnd\.cmd|mvnd)\b(?:\s+\S+)*?\s+(compile|test|integration-test|package|install|verify|deploy)\b",
+        rtk_cmd: "rtk mvnd",
+        rewrite_prefixes: &["mvnd.cmd", "mvnd"],
+        category: "Build",
+        savings_pct: 82.0,
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^ping\b",
         rtk_cmd: "rtk ping",
         rewrite_prefixes: &["ping"],
         category: "Network",
-        savings_pct: 60.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^pio\s+run",
@@ -509,8 +824,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["pio"],
         category: "Build",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^poetry\s+(install|lock|update)\b",
@@ -518,8 +832,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["poetry"],
         category: "Python",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^pre-commit\b",
@@ -527,17 +840,29 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["pre-commit"],
         category: "Build",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^ps(\s|$)",
         rtk_cmd: "rtk ps",
         rewrite_prefixes: &["ps"],
         category: "System",
-        savings_pct: 60.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^pulumi\s+(preview|up|destroy|refresh|stack)(\s|$)",
+        rtk_cmd: "rtk pulumi",
+        rewrite_prefixes: &["pulumi"],
+        category: "Infra",
+        savings_pct: 45.0,
+        subcmd_savings: &[
+            ("up", 66.0),
+            ("destroy", 72.0),
+            ("refresh", 35.0),
+            ("preview", 25.0),
+            ("stack", 29.0),
+        ],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^quarto\s+render",
@@ -545,8 +870,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["quarto"],
         category: "Build",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^rsync\b",
@@ -554,8 +878,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["rsync"],
         category: "Network",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^shellcheck\b",
@@ -563,8 +886,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["shellcheck"],
         category: "Build",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^shopify\s+theme\s+(push|pull)",
@@ -572,17 +894,14 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["shopify"],
         category: "Build",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^sops\b",
         rtk_cmd: "rtk sops",
         rewrite_prefixes: &["sops"],
         category: "Infra",
-        savings_pct: 60.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^swift\s+(build|test)\b",
@@ -591,7 +910,7 @@ pub const RULES: &[RtkRule] = &[
         category: "Build",
         savings_pct: 65.0,
         subcmd_savings: &[("test", 90.0)],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^systemctl\s+status\b",
@@ -599,8 +918,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["systemctl"],
         category: "System",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^terraform\s+plan",
@@ -608,8 +926,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["terraform"],
         category: "Infra",
         savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^tofu\s+(fmt|init|plan|validate)(\s|$)",
@@ -617,8 +934,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["tofu"],
         category: "Infra",
         savings_pct: 70.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^trunk\s+build",
@@ -626,8 +942,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["trunk"],
         category: "Build",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^uv\s+(sync|pip\s+install)\b",
@@ -635,8 +950,7 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["uv"],
         category: "Python",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^yamllint\b",
@@ -644,17 +958,30 @@ pub const RULES: &[RtkRule] = &[
         rewrite_prefixes: &["yamllint"],
         category: "Build",
         savings_pct: 65.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
     },
     RtkRule {
         pattern: r"^wc(\s|$)",
         rtk_cmd: "rtk wc",
         rewrite_prefixes: &["wc"],
         category: "Files",
-        savings_pct: 60.0,
-        subcmd_savings: &[],
-        subcmd_status: &[],
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^gt\s+",
+        rtk_cmd: "rtk gt",
+        rewrite_prefixes: &["gt"],
+        category: "Git",
+        savings_pct: 70.0,
+        ..RtkRule::DEFAULT
+    },
+    RtkRule {
+        pattern: r"^liquibase(?:\s|$)",
+        rtk_cmd: "rtk liquibase",
+        rewrite_prefixes: &["liquibase"],
+        category: "Infra",
+        savings_pct: 65.0,
+        ..RtkRule::DEFAULT
     },
 ];
 
@@ -674,7 +1001,6 @@ pub const IGNORED_PREFIXES: &[&str] = &[
     "touch ",
     "which ",
     "type ",
-    "command ",
     "test ",
     "true",
     "false",
